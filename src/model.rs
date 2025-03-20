@@ -3,7 +3,7 @@ use std::vec;
 
 use crate::config::LlamaConfigJson;
 use crate::kvcache::KVCache;
-use crate::operators as OP;
+use crate::operators::{self as OP, add, masked_softmax, matmul_transb, rms_norm, swiglu, random_sample};
 use crate::params::LLamaParams;
 use crate::tensor::Tensor;
 use safetensors::SafeTensors;
@@ -101,10 +101,20 @@ impl Llama<f32> {
             let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
             let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
 
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
+            self_attention(&mut hidden_states, &mut att_scores, &mut residual, q, full_k, full_v, &self.params.wo[layer], self.n_kv_h, n_groups, seq_len, total_seq_len, self.dqkv);
 
-            todo!("mlp(...)");
+            // MLP computation
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
         }
 
         // No matter what seq_len, the output is always a 1D vector of length vocab,
@@ -133,10 +143,29 @@ impl Llama<f32> {
         top_k: u32,
         temperature: f32,
     ) -> Vec<u32>{
-        let mut result = Vec::<u32>::new();
-        
-        todo!("实现文本生成");
-        
+        let mut result = token_ids.to_vec();
+        let mut input_ids = token_ids.to_vec();
+
+        let mut cache = self.new_cache();
+
+        while result.len() < max_len {
+
+            let shape = vec![input_ids.len()];
+            let input_tensor = Tensor::<u32>::new(input_ids.clone(), &shape);
+    
+            let logits = self.forward(&input_tensor, &mut cache);
+    
+            let next_token_id = random_sample(&logits, top_p, top_k, temperature);
+    
+            result.push(next_token_id);
+            input_ids.clear();
+            input_ids.push(next_token_id); 
+    
+            if next_token_id == self.eos_token_id {
+                break;
+            }
+        }
+
         result
     }
 }
@@ -144,16 +173,111 @@ impl Llama<f32> {
 fn self_attention(
     hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
     att_scores: &mut Tensor<f32>,    // (n_kv_h, n_groups, seq, total_seq)
+    residual: &mut Tensor<f32>,      // (seq, output_dim)
     q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
     k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
     v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
+    o_weight: &Tensor<f32>,          // (n_kv_h * n_groups * dqkv, output_dim)
     n_kv_h: usize,
     n_groups: usize,
     seq_len: usize,
     total_seq_len: usize,
     dqkv: usize,
 ) {
-    todo!("Implement self_attention");
+    // 初始化 score 张量
+    let mut score = Tensor::<f32>::default(&vec![n_kv_h, n_groups, seq_len, total_seq_len]);
+    
+    // 获取 q 和 k 的数据指针
+    let q_data = q.data();
+    let k_data = k.data();
+
+    // 获取 score 的可变数据指针
+    let mut score_data = unsafe { score.data_mut() };
+
+    // 遍历每个 kv 头
+    for kv_head in 0..n_kv_h {
+        // 遍历每个 group
+        for group in 0..n_groups {
+            // 计算当前 group 的 q 和 k 偏移量
+            let q_offset = kv_head * n_groups * dqkv + group * dqkv;
+            let k_offset = kv_head * dqkv;
+
+            // 遍历每个序列位置
+            for i in 0..seq_len {
+                for j in 0..total_seq_len {
+                    // 计算 q 和 k 的点积
+                    let mut dot_project = 0.0;
+                    for d in 0..dqkv {
+                        dot_project += q_data[i * (n_kv_h * n_groups * dqkv) + q_offset + d] * k_data[j * (n_kv_h * dqkv) + k_offset + d];
+                    }
+
+                    // 将点积结果除以 sqrt(dqkv) 以缩放
+                    let index = kv_head * n_groups * seq_len * total_seq_len +
+                                group * seq_len * total_seq_len +
+                                i * total_seq_len +
+                                j;
+                    score_data[index] = dot_project / (dqkv as f32).sqrt();
+                }
+            }
+        }
+    }
+
+    // 应用 masked softmax
+    masked_softmax(&mut score);
+
+    // 计算 attn_V
+    let mut attn_v = Tensor::<f32>::default(&vec![n_kv_h, n_groups, seq_len, dqkv]);
+    let v_data = v.data();
+    let attn_v_data = unsafe { attn_v.data_mut() };
+    let score_data = score.data();
+
+    for kv_head in 0..n_kv_h {
+        for group in 0..n_groups {
+            for i in 0..seq_len {
+                for j in 0..total_seq_len {
+                    let attn_score = score_data[kv_head * n_groups * seq_len * total_seq_len +
+                                                group * seq_len * total_seq_len +
+                                                i * total_seq_len +
+                                                j];
+                    for d in 0..dqkv {
+                        let v_value = v_data[j * (n_kv_h * dqkv) + kv_head * dqkv + d];
+                        attn_v_data[kv_head * n_groups * seq_len * dqkv +
+                                    group * seq_len * dqkv +
+                                    i * dqkv +
+                                    d] += attn_score * v_value;
+                    }
+                }
+            }
+        }
+    }
+
+    // 合并 attn_v 的维度
+    let mut attn_v_combined = Tensor::<f32>::default(&vec![seq_len, n_kv_h * n_groups * dqkv]);
+    let attn_v_combined_data = unsafe { attn_v_combined.data_mut() };
+
+    for i in 0..seq_len {
+        for kv_head in 0..n_kv_h {
+            for group in 0..n_groups {
+                for d in 0..dqkv {
+                    attn_v_combined_data[i * (n_kv_h * n_groups * dqkv) +
+                                        kv_head * n_groups * dqkv +
+                                        group * dqkv +
+                                        d] = attn_v_data[kv_head * n_groups * seq_len * dqkv +
+                                                        group * seq_len * dqkv +
+                                                        i * dqkv +
+                                                        d];
+                }
+            }
+        }
+    }
+
+    // 计算 out = attn_V @ O_weight.T
+    let mut out = Tensor::<f32>::default(&vec![seq_len, o_weight.shape()[1]]);
+    matmul_transb(&mut out, 0.0, &attn_v_combined, o_weight, 1.0);
+
+    // 使用 add 算子计算 residual = out + residual
+    add(residual, &out);
+
 }
 
 fn mlp(
@@ -167,7 +291,12 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    todo!("Implement mlp");
+    rms_norm(hidden_states, residual, rms_w, eps);
+    matmul_transb(gate, 0.0, hidden_states, w_gate, 1.0);
+    matmul_transb(up, 0.0, hidden_states, w_up, 1.0);
+    swiglu(up, gate);
+    matmul_transb(hidden_states, 0.0, up, w_down, 1.0);
+    add(residual, hidden_states);
 }
 
 #[test]

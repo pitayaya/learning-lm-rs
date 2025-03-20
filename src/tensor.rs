@@ -61,8 +61,6 @@ impl<T: Copy + Clone + Default> Tensor<T> {
             length: new_length,
         }
     }
-
-
 }
 
 // Some helper functions for testing and debugging

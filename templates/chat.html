@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        #chat-container {
+            width: 800px; 
+            max-width: 90%; 
+            margin: auto;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            background-color: #fff;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+
+        #chat-tabs {
+            margin-bottom: 20px;
+        }
+
+        .chat-tab {
+            display: inline-block;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #e0e0e0;
+            margin-right: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        .chat-tab.active {
+            background-color: #007bff;
+            color: white;
+        }
+
+        #chat-box {
+            height: 500px;
+            overflow-y: scroll;
+            border-bottom: 1px solid #ccc;
+            margin-bottom: 20px;
+            padding: 20px;
+            font-size: 16px;
+            line-height: 1.6;
+        }
+
+        #user-input {
+            width: calc(100% - 140px); 
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+            float: left; 
+        }
+
+        #send-btn {
+            width: 100px;
+            padding: 10px;
+            border: none;
+            background-color: #007bff;
+            color: #fff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            float: left; 
+        }
+
+        #send-btn:hover {
+            background-color: #0056b3;
+        }
+
+        #new-chat-btn {
+            position: absolute;
+            top: 20px;
+            right: 140px;
+            padding: 10px;
+            border: none;
+            background-color: #007bff;
+            color: #fff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+
+        }
+
+        #new-chat-btn:hover {
+            background-color: #0056b3;
+        }
+
+        .delete-btn {
+            position: absolute;
+            top: 20px;
+            right: 10px;
+            padding: 10px;
+            border: none;
+            background-color: #ff4d4d;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .delete-btn:hover {
+            background-color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+<div id="chat-container">
+    <div id="chat-tabs"></div>
+    <div id="chat-box"></div>
+    <input type="text" id="user-input" placeholder="Type your message here...">
+    <button id="send-btn">Send</button>
+    <button id="new-chat-btn">New Chat</button>
+    <button id="delete-chat-btn" class="delete-btn">Delete Chat</button>
+</div>
+<script>
+    let chatId = 1;
+    const chatHistory = {};
+
+    chatHistory[chatId] = {messages: []};
+
+    try {
+        const storedChats = JSON.parse(localStorage.getItem('chats'));
+        if (storedChats) {
+            for (let id in storedChats) {
+                chatHistory[id] = storedChats[id];
+                addChatTab(parseInt(id));
+            }
+        } else {
+            addChatTab(chatId);
+        }
+    } catch (e) {
+        console.error("Failed to load chats from localStorage:", e);
+        addChatTab(chatId);
+    }
+
+    document.getElementById('send-btn').addEventListener('click', function() {
+        const userInput = document.getElementById('user-input').value.trim();
+        if(userInput === '') return;
+
+        sendUserMessage(userInput);
+    });
+
+    document.getElementById('new-chat-btn').addEventListener('click', function() {
+        chatId++;
+        addChatTab(chatId);
+        saveChatState();
+    });
+
+    document.getElementById('delete-chat-btn').addEventListener('click', function() {
+        deleteCurrentChat();
+    });
+
+    function addChatTab(id) {
+        const chatTabsDiv = document.getElementById('chat-tabs');
+        const newTab = document.createElement('div');
+        newTab.className = 'chat-tab';
+        newTab.textContent = `Chat ${id}`;
+        newTab.onclick = () => switchChat(id);
+        chatTabsDiv.appendChild(newTab);
+
+        if (!chatHistory[id]) {
+            chatHistory[id] = {messages: []};
+        }
+        saveChatState();
+        switchChat(id);
+    }
+
+    function switchChat(id) {
+        chatId = id;
+        updateChatBox();
+        highlightActiveTab();
+    }
+
+    function updateChatBox() {
+        const chatBox = document.getElementById('chat-box');
+        chatBox.innerHTML = ''; 
+        chatHistory[chatId]?.messages.forEach(message => {
+            const msgDiv = document.createElement('div');
+            msgDiv.textContent = `${message.type === 'user' ? 'User:' : 'Bot:'} ${message.content}`;
+            chatBox.appendChild(msgDiv);
+        });
+        chatBox.scrollTop = chatBox.scrollHeight; 
+    }
+
+    function highlightActiveTab() {
+        const tabs = document.querySelectorAll('.chat-tab');
+        tabs.forEach(tab => {
+            if (parseInt(tab.textContent.replace('Chat ', '')) === chatId) {
+                tab.classList.add('active');
+            } else {
+                tab.classList.remove('active');
+            }
+        });
+    }
+
+    function sendUserMessage(userInput) {
+        saveMessage(chatId, 'user', userInput);
+        updateChatBox();
+        document.getElementById('user-input').value = '';
+
+        fetch('/1', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({chat_id: chatId, text: userInput}),
+        })
+        .then(response => response.json())
+        .then(data => {
+            const botReply = data.response;
+            saveMessage(chatId, 'bot', botReply);
+            updateChatBox();
+        })
+        .catch((error) => {
+            console.error('Error:', error);
+        });
+    }
+
+    function deleteCurrentChat() {
+        fetch('/2', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({chat_id: chatId}),
+        })
+        .then(response => {
+            if (response.ok) {
+                removeChatTab(chatId);
+                delete chatHistory[chatId];
+                saveChatState();
+                if (Object.keys(chatHistory).length > 0) {
+                    switchChat(Object.keys(chatHistory)[0]);
+                } else {
+                    chatId = 1;
+                    chatHistory[chatId] = {messages: []};
+                    addChatTab(chatId);
+                }
+            }
+        })
+        .catch((error) => {
+            console.error('Error deleting chat:', error);
+        });
+    }
+
+    function saveMessage(chatId, type, content) {
+        chatHistory[chatId].messages.push({type: type, content: content});
+        saveChatState();
+    }
+
+    function saveChatState() {
+        localStorage.setItem('chats', JSON.stringify(chatHistory));
+    }
+
+    function removeChatTab(id) {
+        const tabs = document.querySelectorAll('.chat-tab');
+        tabs.forEach(tab => {
+            if (parseInt(tab.textContent.replace('Chat ', '')) === id) {
+                tab.remove();
+            }
+        });
+    }
+</script>
+</body>
+</html>

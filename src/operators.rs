@@ -71,25 +71,83 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    let shape = y.shape();
+    let row = shape[0];
+    let col = shape[1];
+
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+    let _w = w.data();
+
+    for i in 0..row {
+        let mut sumx = 0.;
+        for j in 0..col {
+            sumx += _x[i*col + j] * _x[i*col + j];
+        }
+
+        for j in 0..col {
+            _y[i*col + j] = (_w[j] * _x[i*col + j]) / (1. / (col as f32) * sumx + epsilon).sqrt();
+        }
+    }
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    for i in 0..len {
+        let silu_x = _x[i] / (1.0 + (-_x[i]).exp()); // 计算 silu(x)
+        _y[i] = silu_x * _y[i]; // 更新 y
+    }
 }
 
+pub fn add(y: &mut Tensor<f32>, x: &Tensor<f32>) {
+    let len = y.size();
+    assert!(len == x.size());
+
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+
+    for i in 0..len {
+        _y[i] = _y[i] + _x[i]; // 更新 y
+    }
+}
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    let shape_c = c.shape();
+    let rows_c = shape_c[0];
+    let cols_c = shape_c[1];
+
+    let shape_a = a.shape();
+    let rows_a = shape_a[0];
+    let cols_a = shape_a[1];
+
+    let shape_b = b.shape();
+    let rows_b = shape_b[0];
+    let cols_b = shape_b[1];
+
+    assert!(rows_c == rows_a && cols_c == rows_b && cols_a == cols_b,
+        "Matrix dimensions do not match for multiplication");
+
+    let _c = unsafe { c.data_mut() };
+    let _a = a.data();
+    let _b = b.data();
+
+    for i in 0..rows_c {
+        for j in 0..cols_c {
+            let mut sum_ab: f32 = 0.0;
+            for k in 0..cols_a {
+                sum_ab += _a[i * cols_a + k] * _b[j * cols_b + k];
+            }
+            _c[i * cols_c + j] = beta * _c[i * cols_c + j] + alpha * sum_ab;
+        }
+    }
 }
 
 // Dot product of two tensors (treated as vectors)
